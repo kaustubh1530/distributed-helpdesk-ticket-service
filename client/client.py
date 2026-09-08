@@ -1,17 +1,27 @@
 import json
+import sys
 import urllib.request
 import urllib.error
+import uuid
 
 
 SERVER_URL = "http://localhost:8000"
 
 
-def create_ticket(client_id, title):
-    """Send a request to create a new help desk ticket."""
+def create_ticket(
+    client_id,
+    title,
+    client_lamport=1
+):
+    """Send a ticket creation request to the server."""
+
+    request_id = str(uuid.uuid4())
 
     data = {
+        "request_id": request_id,
         "client_id": client_id,
-        "title": title
+        "title": title,
+        "client_lamport": client_lamport
     }
 
     request_data = json.dumps(data).encode("utf-8")
@@ -26,30 +36,59 @@ def create_ticket(client_id, title):
     )
 
     try:
-        with urllib.request.urlopen(request) as response:
-            response_data = response.read().decode("utf-8")
 
-            print(f"\nClient: {client_id}")
-            print("Server response:")
-            print(json.dumps(json.loads(response_data), indent=2))
+        with urllib.request.urlopen(request) as response:
+
+            response_data = response.read().decode(
+                "utf-8"
+            )
+
+            print("\nRequest sent:")
+            print(
+                json.dumps(
+                    data,
+                    indent=2
+                )
+            )
+
+            print("\nServer response:")
+            print(
+                json.dumps(
+                    json.loads(response_data),
+                    indent=2
+                )
+            )
 
     except urllib.error.HTTPError as error:
-        print(f"HTTP Error: {error.code}")
+
+        print(f"\nHTTP Error: {error.code}")
         print(error.read().decode("utf-8"))
 
     except urllib.error.URLError as error:
-        print(f"Connection Error: {error.reason}")
+
+        print(
+            f"\nConnection Error: {error.reason}"
+        )
 
 
 if __name__ == "__main__":
-    import sys
 
     if len(sys.argv) < 3:
-        print("Usage:")
-        print("python client/client.py <client_id> <ticket_title>")
+
+        print(
+            "Usage:\n"
+            "python client/client.py "
+            "<client_id> <ticket_title>"
+        )
+
         sys.exit(1)
 
     client_id = sys.argv[1]
+
     title = " ".join(sys.argv[2:])
 
-    create_ticket(client_id, title)
+    create_ticket(
+        client_id,
+        title
+    )
+    

@@ -45,71 +45,135 @@ class TicketRequestHandler(BaseHTTPRequestHandler):
 
         else:
 
-            response = {
-                "error": "Endpoint not found"
-            }
-
-            self.send_json_response(404, response)
+            self.send_json_response(
+                404,
+                {"error": "Endpoint not found"}
+            )
 
     def do_POST(self):
         """Handle POST requests."""
 
         global next_ticket_id
 
-        if self.path == "/tickets":
+        if self.path != "/tickets":
 
-            # Read request body
-            content_length = int(
-                self.headers.get("Content-Length", 0)
+            self.send_json_response(
+                404,
+                {"error": "Endpoint not found"}
+            )
+            return
+
+        # Read request body
+        content_length = int(
+            self.headers.get("Content-Length", 0)
+        )
+
+        request_body = self.rfile.read(content_length)
+
+        # Convert JSON request into Python data
+        try:
+            data = json.loads(
+                request_body.decode("utf-8")
             )
 
-            request_body = self.rfile.read(content_length)
+        except json.JSONDecodeError:
 
-            try:
-                data = json.loads(request_body.decode("utf-8"))
+            self.send_json_response(
+                400,
+                {"error": "Invalid JSON"}
+            )
+            return
 
-            except json.JSONDecodeError:
+        # Required fields from the Midterm specification
+        required_fields = [
+            "request_id",
+            "client_id",
+            "title",
+            "client_lamport"
+        ]
 
-                response = {
-                    "error": "Invalid JSON"
+        # Check for missing fields
+        missing_fields = [
+            field
+            for field in required_fields
+            if field not in data
+        ]
+
+        if missing_fields:
+
+            self.send_json_response(
+                400,
+                {
+                    "error": "Missing required fields",
+                    "missing_fields": missing_fields
                 }
+            )
+            return
 
-                self.send_json_response(400, response)
-                return
+        # Extract request data
+        request_id = data["request_id"]
+        client_id = data["client_id"]
+        title = data["title"]
+        client_lamport = data["client_lamport"]
 
-            # Validate required field
-            title = data.get("title")
+        # Basic validation
+        if not isinstance(request_id, str) or not request_id.strip():
 
-            if not title:
+            self.send_json_response(
+                400,
+                {"error": "request_id must be a non-empty string"}
+            )
+            return
 
-                response = {
-                    "error": "Ticket title is required"
+        if not isinstance(client_id, str) or not client_id.strip():
+
+            self.send_json_response(
+                400,
+                {"error": "client_id must be a non-empty string"}
+            )
+            return
+
+        if not isinstance(title, str) or not title.strip():
+
+            self.send_json_response(
+                400,
+                {"error": "title must be a non-empty string"}
+            )
+            return
+
+        if (
+            not isinstance(client_lamport, int)
+            or isinstance(client_lamport, bool)
+            or client_lamport < 0
+        ):
+
+            self.send_json_response(
+                400,
+                {
+                    "error": (
+                        "client_lamport must be "
+                        "a non-negative integer"
+                    )
                 }
+            )
+            return
 
-                self.send_json_response(400, response)
-                return
+        # Create ticket
+        ticket = {
+            "ticket_id": next_ticket_id,
+            "request_id": request_id,
+            "client_id": client_id,
+            "title": title,
+            "client_lamport": client_lamport,
+            "status": "open"
+        }
 
-            # Create ticket
-            ticket = {
-                "ticket_id": next_ticket_id,
-                "title": title,
-                "status": "open"
-            }
+        tickets.append(ticket)
 
-            tickets.append(ticket)
+        next_ticket_id += 1
 
-            next_ticket_id += 1
-
-            # Return created ticket
-            self.send_json_response(201, ticket)
-
-        else:
-
-            response = {
-                "error": "Endpoint not found"
-            }
-
-            self.send_json_response(404, response)
+        # Return created ticket
+        self.send_json_response(201, ticket)
 
 
 def run_server():
