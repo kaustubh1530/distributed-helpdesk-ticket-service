@@ -1,5 +1,7 @@
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
 import json
+import time
 
 
 # In-memory ticket storage
@@ -13,6 +15,12 @@ server_lamport = 0
 
 # Server-assigned ordering sequence
 server_sequence = 0
+
+# Phase 4 controlled timeout experiment
+# True = delay successful responses by 5 seconds
+# False = normal operation
+DELAY_RESPONSE = True
+DELAY_SECONDS = 5
 
 
 def send_json_response(handler, status_code, data):
@@ -28,6 +36,9 @@ def send_json_response(handler, status_code, data):
 class TicketRequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
+        global server_lamport
+        global server_sequence
+
         if self.path == "/health":
             response = {
                 "node_name": "ticket-server",
@@ -66,11 +77,15 @@ class TicketRequestHandler(BaseHTTPRequestHandler):
             )
             return
 
-        content_length = int(self.headers.get("Content-Length", 0))
+        content_length = int(
+            self.headers.get("Content-Length", 0)
+        )
+
         body = self.rfile.read(content_length)
 
         try:
             data = json.loads(body.decode("utf-8"))
+
         except json.JSONDecodeError:
             send_json_response(
                 self,
@@ -87,7 +102,8 @@ class TicketRequestHandler(BaseHTTPRequestHandler):
         ]
 
         missing_fields = [
-            field for field in required_fields
+            field
+            for field in required_fields
             if field not in data
         ]
 
@@ -159,20 +175,43 @@ class TicketRequestHandler(BaseHTTPRequestHandler):
             )
             return
 
-        # Lamport logical clock update
+        # -------------------------------------------------
+        # DUPLICATE / IDEMPOTENCY CHECK
+        # -------------------------------------------------
+        for existing_ticket in tickets:
+            if existing_ticket["request_id"] == request_id:
 
+                duplicate_response = existing_ticket.copy()
+
+                duplicate_response["duplicate"] = True
+
+                print(
+                    f"[DUPLICATE] request_id={request_id} "
+                    f"ticket_id={existing_ticket['ticket_id']}"
+                )
+
+                send_json_response(
+                    self,
+                    200,
+                    duplicate_response
+                )
+
+                return
+
+        # -------------------------------------------------
+        # Lamport logical clock update
+        # -------------------------------------------------
         server_lamport = max(
             client_lamport,
             server_lamport
         ) + 1
 
         # Assign server ordering sequence
-
         server_sequence += 1
 
-
+        # -------------------------------------------------
         # Create ticket
-
+        # -------------------------------------------------
         ticket = {
             "ticket_id": next_ticket_id,
             "request_id": request_id,
@@ -188,6 +227,24 @@ class TicketRequestHandler(BaseHTTPRequestHandler):
 
         next_ticket_id += 1
 
+        print(
+            f"[CREATE] request_id={request_id} "
+            f"ticket_id={ticket['ticket_id']} "
+            f"server_sequence={server_sequence}"
+        )
+
+        # -------------------------------------------------
+        # Controlled delay for Phase 4 timeout test
+        # -------------------------------------------------
+        if DELAY_RESPONSE:
+            print(
+                f"[DELAY] Waiting {DELAY_SECONDS} seconds "
+                f"before sending response..."
+            )
+
+            time.sleep(DELAY_SECONDS)
+
+        # Send original response
         send_json_response(
             self,
             201,
@@ -196,6 +253,7 @@ class TicketRequestHandler(BaseHTTPRequestHandler):
 
 
 def run_server():
+
     server_address = ("localhost", 8000)
 
     server = HTTPServer(
@@ -203,7 +261,22 @@ def run_server():
         TicketRequestHandler
     )
 
-    print("Help Desk Ticket Server running on http://localhost:8000")
+    print(
+        "Help Desk Ticket Server running on "
+        "http://localhost:8000"
+    )
+
+    print(
+        f"Response delay enabled: "
+        f"{DELAY_RESPONSE}"
+    )
+
+    if DELAY_RESPONSE:
+        print(
+            f"Response delay: "
+            f"{DELAY_SECONDS} seconds"
+        )
+
     print("Press Ctrl+C to stop the server.")
 
     server.serve_forever()

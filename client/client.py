@@ -18,9 +18,11 @@ def increment_lamport_clock():
 
 
 def create_ticket(client_id, title):
+    # Generate one request ID for the entire operation.
+    # All retries reuse this same ID.
     request_id = str(uuid.uuid4())
 
-    # Increment Lamport clock before sending the request
+    # Increment Lamport clock once before sending the request
     client_lamport = increment_lamport_clock()
 
     payload = {
@@ -32,29 +34,49 @@ def create_ticket(client_id, title):
 
     data = json.dumps(payload).encode("utf-8")
 
-    request = urllib.request.Request(
-        f"{SERVER_URL}/tickets",
-        data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST"
-    )
+    # Maximum number of retries = 2
+    # Maximum total attempts = 3
+    max_retries = 2
 
-    print("\nRequest sent:")
-    print(json.dumps(payload, indent=2))
+    for attempt in range(max_retries + 1):
 
-    try:
-        with urllib.request.urlopen(request) as response:
-            response_data = json.loads(response.read().decode("utf-8"))
+        request = urllib.request.Request(
+            f"{SERVER_URL}/tickets",
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
 
-        print("\nServer response:")
-        print(json.dumps(response_data, indent=2))
+        print(f"\nAttempt {attempt + 1} of {max_retries + 1}")
 
-    except urllib.error.HTTPError as error:
-        print(f"\nHTTP error: {error.code}")
-        print(error.read().decode("utf-8"))
+        print("Request sent:")
+        print(json.dumps(payload, indent=2))
 
-    except urllib.error.URLError as error:
-        print(f"\nConnection error: {error.reason}")
+        try:
+            with urllib.request.urlopen(request, timeout=3) as response:
+                response_data = json.loads(
+                    response.read().decode("utf-8")
+                )
+
+            print("\nServer response:")
+            print(json.dumps(response_data, indent=2))
+
+            return response_data
+
+        except urllib.error.HTTPError as error:
+            print(f"\nHTTP error: {error.code}")
+            print(error.read().decode("utf-8"))
+            return None
+
+        except (urllib.error.URLError, TimeoutError) as error:
+            print(f"\nConnection/timeout error: {error}")
+
+            if attempt < max_retries:
+                print("Retrying...")
+            else:
+                print("Maximum retries reached. Request failed.")
+
+    return None
 
 
 def main():
