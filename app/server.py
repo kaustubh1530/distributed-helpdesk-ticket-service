@@ -3,7 +3,18 @@ import json
 import sys
 import urllib.request
 import urllib.error
+import logging
+import os
 
+os.makedirs("logs", exist_ok=True)
+
+logging.basicConfig(
+    filename="logs/server.log",
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
+
+logger = logging.getLogger(__name__)
 
 # In-memory ticket storage
 
@@ -173,6 +184,7 @@ class TicketRequestHandler(BaseHTTPRequestHandler):
             self.handle_replication()
 
             return
+
         # Client ticket endpoint
 
         if self.path != "/tickets":
@@ -352,6 +364,17 @@ class TicketRequestHandler(BaseHTTPRequestHandler):
                 request_id
             ]
 
+            logger.info(
+                f"request_id={request_id} | "
+                f"client_id={client_id} | "
+                f"logical_time="
+                f"{original_ticket['server_lamport']} | "
+                f"server_sequence="
+                f"{original_ticket['server_sequence']} | "
+                f"result=duplicate | "
+                f"duplicate=true"
+            )
+
             duplicate_response = dict(
                 original_ticket
             )
@@ -400,6 +423,17 @@ class TicketRequestHandler(BaseHTTPRequestHandler):
             request_id
         ] = dict(ticket)
 
+        # Log accepted ticket
+
+        logger.info(
+            f"request_id={request_id} | "
+            f"client_id={client_id} | "
+            f"logical_time={server_lamport} | "
+            f"server_sequence={server_sequence} | "
+            f"result=created | "
+            f"duplicate=false"
+        )
+
         # Replicate to followers
 
         replication_results = replicate_ticket(
@@ -427,6 +461,7 @@ class TicketRequestHandler(BaseHTTPRequestHandler):
         global next_ticket_id
 
         # Only followers should receive replication
+
         if ROLE != "follower":
 
             send_json_response(
@@ -534,6 +569,7 @@ class TicketRequestHandler(BaseHTTPRequestHandler):
         ] = dict(ticket)
 
         # Keep local counters synchronized
+
         server_lamport = max(
             server_lamport,
             ticket["server_lamport"]
