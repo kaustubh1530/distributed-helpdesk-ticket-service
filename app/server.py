@@ -434,12 +434,12 @@ class TicketRequestHandler(BaseHTTPRequestHandler):
             f"duplicate=false"
         )
 
+
         # Replicate to followers
 
         replication_results = replicate_ticket(
             ticket
         )
-
         # Return result
 
         response = dict(ticket)
