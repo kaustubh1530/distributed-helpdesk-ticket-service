@@ -5,6 +5,7 @@ import urllib.error
 import uuid
 
 
+
 SERVER_URL = "http://localhost:8000"
 
 # Lamport logical clock for this client process
@@ -18,6 +19,8 @@ def increment_lamport_clock():
 
 
 def create_ticket(client_id, title):
+    global lamport_clock
+
     # Generate one request ID for the entire operation.
     # All retries reuse this same ID.
     request_id = str(uuid.uuid4())
@@ -60,6 +63,14 @@ def create_ticket(client_id, title):
 
             print("\nServer response:")
             print(json.dumps(response_data, indent=2))
+
+            # Update the client Lamport clock after receiving the response.
+            server_lamport = response_data.get("server_lamport")
+
+            if server_lamport is not None:
+                lamport_clock = max(lamport_clock, server_lamport) + 1
+
+            print(f"Client Lamport clock updated to: {lamport_clock}")
 
             return response_data
 

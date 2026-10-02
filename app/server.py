@@ -5,6 +5,7 @@ import urllib.request
 import urllib.error
 import logging
 import os
+import time
 
 os.makedirs("logs", exist_ok=True)
 
@@ -35,6 +36,11 @@ server_sequence = 0
 NODE_NAME = "ticket-server"
 ROLE = "leader"
 PORT = 8000
+
+# Optional response delay used for reproducible timeout testing.
+DELAY_RESPONSE_SECONDS = float(
+    os.getenv("DELAY_RESPONSE_SECONDS", "0")
+)
 
 # Followers used by the leader
 FOLLOWERS = [
@@ -442,10 +448,17 @@ class TicketRequestHandler(BaseHTTPRequestHandler):
         )
         # Return result
 
+        # Optional delay for reproducible timeout/retry testing.
+        if DELAY_RESPONSE_SECONDS > 0:
+            logger.info(
+                f"response_delay={DELAY_RESPONSE_SECONDS} | "
+                f"request_id={request_id}"
+            )
+            time.sleep(DELAY_RESPONSE_SECONDS)
+
+        # Return result
         response = dict(ticket)
-
         response["replication"] = replication_results
-
         send_json_response(
             self,
             201,
