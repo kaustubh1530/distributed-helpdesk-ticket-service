@@ -124,7 +124,13 @@ def replicate_ticket(ticket):
                 "error": str(error)
             })
 
-    return replication_results
+    successful_replications = sum(
+        1
+        for result in replication_results
+        if result["success"]
+    )
+
+    return replication_results, successful_replications
 
 
 # Request handler
@@ -443,9 +449,15 @@ class TicketRequestHandler(BaseHTTPRequestHandler):
 
         # Replicate to followers
 
-        replication_results = replicate_ticket(
+        replication_results, successful_replications = replicate_ticket(
             ticket
         )
+
+        majority_required = 2
+        majority_acknowledged = (
+            1 + successful_replications
+        ) >= majority_required
+
         # Return result
 
         # Optional delay for reproducible timeout/retry testing.
@@ -459,6 +471,9 @@ class TicketRequestHandler(BaseHTTPRequestHandler):
         # Return result
         response = dict(ticket)
         response["replication"] = replication_results
+        response["successful_replications"] = successful_replications
+        response["majority_required"] = majority_required
+        response["majority_acknowledged"] = majority_acknowledged
         send_json_response(
             self,
             201,
