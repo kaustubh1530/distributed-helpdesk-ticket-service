@@ -1,33 +1,33 @@
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
-import sys
-import urllib.request
-import urllib.error
 import logging
 import os
+import sys
 import time
+import urllib.error
+import urllib.request
+
+
+# Logging
 
 os.makedirs("logs", exist_ok=True)
 
 logging.basicConfig(
     filename="logs/server.log",
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
+    format="%(asctime)s | %(levelname)s | %(message)s",
 )
 
 logger = logging.getLogger(__name__)
 
-# In-memory ticket storage
+
+# In-memory state
 
 tickets = []
+processed_requests = {}
 
-# Next ticket ID
 next_ticket_id = 1
-
-# Server Lamport logical clock
 server_lamport = 0
-
-# Server-assigned ordering sequence
 server_sequence = 0
 
 
@@ -37,92 +37,92 @@ NODE_NAME = "ticket-server"
 ROLE = "leader"
 PORT = 8000
 
-# Optional response delay used for reproducible timeout testing.
+FOLLOWERS = [
+    "http://localhost:8001",
+    "http://localhost:8002",
+]
+
+# Used for the reproducible delayed-response/retry test.
 DELAY_RESPONSE_SECONDS = float(
     os.getenv("DELAY_RESPONSE_SECONDS", "0")
 )
 
-# Followers used by the leader
-FOLLOWERS = [
-    "http://localhost:8001",
-    "http://localhost:8002"
-]
+# Final project quorum requirement.
+MAJORITY_REQUIRED = 2
 
-
-# Request idempotency tracking
-
-processed_requests = {}
-
-
-# JSON response helper
 
 def send_json_response(handler, status_code, data):
+    """Send a JSON HTTP response."""
     response = json.dumps(data).encode("utf-8")
 
     handler.send_response(status_code)
     handler.send_header("Content-Type", "application/json")
     handler.send_header("Content-Length", str(len(response)))
     handler.end_headers()
-
     handler.wfile.write(response)
 
 
-# Replication helper
+def get_replication_targets():
+    """Return follower nodes other than the current node."""
+    current_url = f"http://localhost:{PORT}"
+    return [
+        follower_url
+        for follower_url in FOLLOWERS
+        if follower_url != current_url
+    ]
+
 
 def replicate_ticket(ticket):
-    """
-    Leader sends a ticket to both followers.
+    """Send a ticket to the other nodes.
 
-    This phase demonstrates basic synchronous-style
-    replication, but quorum acknowledgment is NOT
-    implemented yet. That comes in Phase 6.
+    Returns:
+        replication_results:
+            Detailed result for each target node.
+        successful_replications:
+            Number of target nodes that acknowledged successfully.
     """
-
     replication_results = []
-
     data = json.dumps(ticket).encode("utf-8")
 
-    for follower_url in FOLLOWERS:
-
+    for follower_url in get_replication_targets():
         request = urllib.request.Request(
             f"{follower_url}/replicate",
             data=data,
             headers={"Content-Type": "application/json"},
-            method="POST"
+            method="POST",
         )
 
         try:
-
-            with urllib.request.urlopen(
-                request,
-                timeout=2
-            ) as response:
-
+            with urllib.request.urlopen(request, timeout=2) as response:
                 response_data = json.loads(
                     response.read().decode("utf-8")
                 )
 
-            replication_results.append({
-                "node": follower_url,
-                "success": True,
-                "response": response_data
-            })
+            replication_results.append(
+                {
+                    "node": follower_url,
+                    "success": True,
+                    "response": response_data,
+                }
+            )
 
         except urllib.error.URLError as error:
-
-            replication_results.append({
-                "node": follower_url,
-                "success": False,
-                "error": str(error.reason)
-            })
+            replication_results.append(
+                {
+                    "node": follower_url,
+                    "success": False,
+                    "error": str(error.reason),
+                }
+            )
 
         except Exception as error:
-
-            replication_results.append({
-                "node": follower_url,
-                "success": False,
-                "error": str(error)
-            })
+            replication_results.append(
+                {
+                    "node": follower_url,
+                    "success": False,
+                    "error": str(error),
+                }
+            )
 
     successful_replications = sum(
         1
@@ -133,139 +133,175 @@ def replicate_ticket(ticket):
     return replication_results, successful_replications
 
 
-# Request handler
+def get_full_state():
+    """Return the complete committed state for recovery."""
+    return {
+        "node_name": NODE_NAME,
+        "role": ROLE,
+        "tickets": tickets,
+        "processed_requests": processed_requests,
+        "next_ticket_id": next_ticket_id,
+        "server_lamport": server_lamport,
+        "server_sequence": server_sequence,
+    }
+
+
+def apply_full_state(state):
+    """Replace local state with state received from the active leader."""
+    global tickets
+    global processed_requests
+    global next_ticket_id
+    global server_lamport
+    global server_sequence
+
+    tickets = list(state.get("tickets", []))
+    processed_requests = dict(state.get("processed_requests", {}))
+    next_ticket_id = int(state.get("next_ticket_id", 1))
+    server_lamport = int(state.get("server_lamport", 0))
+    server_sequence = int(state.get("server_sequence", 0))
+
 
 class TicketRequestHandler(BaseHTTPRequestHandler):
 
-    # GET endpoints
-
     def do_GET(self):
+        global server_lamport
 
         if self.path == "/health":
-
             response = {
                 "node_name": NODE_NAME,
                 "role": ROLE,
-                "status": "healthy"
+                "status": "healthy",
             }
 
-            send_json_response(
-                self,
-                200,
-                response
-            )
+            send_json_response(self, 200, response)
+            return
 
-        elif self.path == "/tickets":
-
+        if self.path == "/tickets":
             response = {
                 "node_name": NODE_NAME,
                 "role": ROLE,
                 "tickets": tickets,
                 "server_lamport": server_lamport,
-                "server_sequence": server_sequence
+                "server_sequence": server_sequence,
             }
 
-            send_json_response(
-                self,
-                200,
-                response
-            )
+            send_json_response(self, 200, response)
+            return
 
-        else:
+        if self.path == "/state":
+            if ROLE != "leader":
+                send_json_response(
+                    self,
+                    403,
+                    {
+                        "error": "Only the leader can provide recovery state"
+                    },
+                )
+                return
 
-            send_json_response(
-                self,
-                404,
-                {
-                    "error": "Endpoint not found"
-                }
-            )
+            send_json_response(self, 200, get_full_state())
+            return
 
-    # POST endpoints
+        send_json_response(
+            self,
+            404,
+            {"error": "Endpoint not found"},
+        )
 
     def do_POST(self):
-
+        global ROLE
         global next_ticket_id
         global server_lamport
         global server_sequence
 
-        # Replication endpoint
+        # Manual leader promotion.
+        if self.path == "/promote":
+            if ROLE != "follower":
+                send_json_response(
+                    self,
+                    400,
+                    {
+                        "error": "Only a follower can be promoted"
+                    },
+                )
+                return
 
-        if self.path == "/replicate":
+            ROLE = "leader"
 
-            self.handle_replication()
-
-            return
-
-        # Client ticket endpoint
-
-        if self.path != "/tickets":
+            logger.info(
+                f"node_name={NODE_NAME} | "
+                f"role=leader | "
+                f"result=manual_promotion"
+            )
 
             send_json_response(
                 self,
-                404,
+                200,
                 {
-                    "error": "Endpoint not found"
-                }
+                    "node_name": NODE_NAME,
+                    "role": ROLE,
+                    "status": "promoted",
+                    "tickets": len(tickets),
+                    "server_lamport": server_lamport,
+                    "server_sequence": server_sequence,
+                },
             )
-
             return
 
-        # Followers do not accept client writes
+        # Follower recovery endpoint.
+        if self.path == "/recover":
+            self.handle_recovery()
+            return
 
+        # Follower replication endpoint.
+        if self.path == "/replicate":
+            self.handle_replication()
+            return
+
+        # Client ticket endpoint.
+        if self.path != "/tickets":
+            send_json_response(
+                self,
+                404,
+                {"error": "Endpoint not found"},
+            )
+            return
+
+        # Followers do not accept direct client writes.
         if ROLE != "leader":
-
             send_json_response(
                 self,
                 403,
                 {
-                    "error":
-                    "Follower nodes do not accept client writes"
-                }
+                    "error": (
+                        "Follower nodes do not accept client writes"
+                    )
+                },
             )
-
             return
 
-        # Read request body
-
+        # Read request body.
         content_length = int(
-            self.headers.get(
-                "Content-Length",
-                0
-            )
+            self.headers.get("Content-Length", 0)
         )
-
-        body = self.rfile.read(
-            content_length
-        )
-
-        # Parse JSON
+        body = self.rfile.read(content_length)
 
         try:
-
-            data = json.loads(
-                body.decode("utf-8")
-            )
-
+            data = json.loads(body.decode("utf-8"))
         except json.JSONDecodeError:
-
             send_json_response(
                 self,
                 400,
-                {
-                    "error": "Invalid JSON"
-                }
+                {"error": "Invalid JSON"},
             )
-
             return
 
-        # Required fields
-
+        # Validate required fields.
         required_fields = [
             "request_id",
             "client_id",
             "title",
-            "client_lamport"
+            "client_lamport",
         ]
 
         missing_fields = [
@@ -275,18 +311,14 @@ class TicketRequestHandler(BaseHTTPRequestHandler):
         ]
 
         if missing_fields:
-
             send_json_response(
                 self,
                 400,
                 {
-                    "error":
-                    "Missing required fields",
-                    "missing_fields":
-                    missing_fields
-                }
+                    "error": "Missing required fields",
+                    "missing_fields": missing_fields,
+                },
             )
-
             return
 
         request_id = data["request_id"]
@@ -294,87 +326,73 @@ class TicketRequestHandler(BaseHTTPRequestHandler):
         title = data["title"]
         client_lamport = data["client_lamport"]
 
-        # Validate request ID
-
+        # Validate request ID.
         if (
             not isinstance(request_id, str)
             or not request_id.strip()
         ):
-
             send_json_response(
                 self,
                 400,
                 {
-                    "error":
-                    "request_id must be a non-empty string"
-                }
+                    "error": (
+                        "request_id must be a non-empty string"
+                    )
+                },
             )
-
             return
 
-        # Validate client ID
-
+        # Validate client ID.
         if (
             not isinstance(client_id, str)
             or not client_id.strip()
         ):
-
             send_json_response(
                 self,
                 400,
                 {
-                    "error":
-                    "client_id must be a non-empty string"
-                }
+                    "error": (
+                        "client_id must be a non-empty string"
+                    )
+                },
             )
-
             return
 
-        # Validate title
-
+        # Validate title.
         if (
             not isinstance(title, str)
             or not title.strip()
         ):
-
             send_json_response(
                 self,
                 400,
                 {
-                    "error":
-                    "title must be a non-empty string"
-                }
+                    "error": "title must be a non-empty string"
+                },
             )
-
             return
 
-        # Validate Lamport clock
-
+        # Validate Lamport clock.
         if (
             isinstance(client_lamport, bool)
             or not isinstance(client_lamport, int)
             or client_lamport < 0
         ):
-
             send_json_response(
                 self,
                 400,
                 {
-                    "error":
-                    "client_lamport must be a "
-                    "non-negative integer"
-                }
+                    "error": (
+                        "client_lamport must be a "
+                        "non-negative integer"
+                    )
+                },
             )
-
             return
 
-        # Idempotency check
-
+        # Idempotency check.
         if request_id in processed_requests:
-
-            original_ticket = processed_requests[
-                request_id
-            ]
+            original_ticket = processed_requests[request_id]
 
             logger.info(
                 f"request_id={request_id} | "
@@ -387,33 +405,27 @@ class TicketRequestHandler(BaseHTTPRequestHandler):
                 f"duplicate=true"
             )
 
-            duplicate_response = dict(
-                original_ticket
-            )
-
+            duplicate_response = dict(original_ticket)
             duplicate_response["duplicate"] = True
+            duplicate_response["committed"] = True
 
             send_json_response(
                 self,
                 200,
-                duplicate_response
+                duplicate_response,
             )
-
             return
 
-        # Lamport logical clock update
-
+        # Lamport logical clock update.
         server_lamport = max(
             client_lamport,
-            server_lamport
+            server_lamport,
         ) + 1
 
-        # Server total ordering
-
+        # Server total ordering.
         server_sequence += 1
 
-        # Create ticket
-
+        # Create ticket candidate.
         ticket = {
             "ticket_id": next_ticket_id,
             "request_id": request_id,
@@ -422,20 +434,55 @@ class TicketRequestHandler(BaseHTTPRequestHandler):
             "client_lamport": client_lamport,
             "server_lamport": server_lamport,
             "server_sequence": server_sequence,
-            "status": "open"
+            "status": "open",
         }
 
-        tickets.append(ticket)
+        # Replicate before local commit.
+        replication_results, successful_replications = (
+            replicate_ticket(ticket)
+        )
 
+        # The leader counts as one acknowledgment.
+        total_acknowledgments = (
+            1 + successful_replications
+        )
+
+        majority_acknowledged = (
+            total_acknowledgments >= MAJORITY_REQUIRED
+        )
+
+        # Majority failure: do not commit locally.
+        if not majority_acknowledged:
+            logger.info(
+                f"request_id={request_id} | "
+                f"client_id={client_id} | "
+                f"logical_time={server_lamport} | "
+                f"server_sequence={server_sequence} | "
+                f"result=not_committed | "
+                f"duplicate=false"
+            )
+
+            response = dict(ticket)
+            response["replication"] = replication_results
+            response["successful_replications"] = (
+                successful_replications
+            )
+            response["majority_required"] = MAJORITY_REQUIRED
+            response["majority_acknowledged"] = False
+            response["committed"] = False
+
+            send_json_response(
+                self,
+                503,
+                response,
+            )
+            return
+
+        # Majority succeeded: commit locally.
+        tickets.append(ticket)
         next_ticket_id += 1
 
-        # Store request result for idempotency
-
-        processed_requests[
-            request_id
-        ] = dict(ticket)
-
-        # Log accepted ticket
+        processed_requests[request_id] = dict(ticket)
 
         logger.info(
             f"request_id={request_id} | "
@@ -446,94 +493,148 @@ class TicketRequestHandler(BaseHTTPRequestHandler):
             f"duplicate=false"
         )
 
-
-        # Replicate to followers
-
-        replication_results, successful_replications = replicate_ticket(
-            ticket
-        )
-
-        majority_required = 2
-        majority_acknowledged = (
-            1 + successful_replications
-        ) >= majority_required
-
-        # Return result
-
-        # Optional delay for reproducible timeout/retry testing.
+        # Optional response delay for retry testing.
         if DELAY_RESPONSE_SECONDS > 0:
             logger.info(
-                f"response_delay={DELAY_RESPONSE_SECONDS} | "
+                f"response_delay="
+                f"{DELAY_RESPONSE_SECONDS} | "
                 f"request_id={request_id}"
             )
             time.sleep(DELAY_RESPONSE_SECONDS)
 
-        # Return result
+        # Return successful result.
         response = dict(ticket)
         response["replication"] = replication_results
-        response["successful_replications"] = successful_replications
-        response["majority_required"] = majority_required
-        response["majority_acknowledged"] = majority_acknowledged
+        response["successful_replications"] = (
+            successful_replications
+        )
+        response["majority_required"] = MAJORITY_REQUIRED
+        response["majority_acknowledged"] = True
+        response["committed"] = True
+
         send_json_response(
             self,
             201,
-            response
+            response,
         )
 
-    # Replication handler
-
-    def handle_replication(self):
-
+    def handle_recovery(self):
+        """Recover this follower from the active leader."""
         global server_lamport
-        global server_sequence
-        global next_ticket_id
-
-        # Only followers should receive replication
 
         if ROLE != "follower":
-
             send_json_response(
                 self,
                 403,
                 {
-                    "error":
-                    "Only follower nodes accept replication"
-                }
+                    "error": "Only follower nodes can recover"
+                },
             )
-
             return
 
         content_length = int(
-            self.headers.get(
-                "Content-Length",
-                0
-            )
+            self.headers.get("Content-Length", 0)
         )
-
-        body = self.rfile.read(
-            content_length
-        )
+        body = self.rfile.read(content_length)
 
         try:
-
-            ticket = json.loads(
-                body.decode("utf-8")
-            )
-
+            state = json.loads(body.decode("utf-8"))
         except json.JSONDecodeError:
-
             send_json_response(
                 self,
                 400,
                 {
-                    "error": "Invalid JSON"
-                }
+                    "error": "Invalid recovery state"
+                },
             )
-
             return
 
-        # Validate replicated ticket
+        required_fields = [
+            "tickets",
+            "processed_requests",
+            "next_ticket_id",
+            "server_lamport",
+            "server_sequence",
+        ]
 
+        missing_fields = [
+            field
+            for field in required_fields
+            if field not in state
+        ]
+
+        if missing_fields:
+            send_json_response(
+                self,
+                400,
+                {
+                    "error": "Missing recovery fields",
+                    "missing_fields": missing_fields,
+                },
+            )
+            return
+
+        apply_full_state(state)
+
+        logger.info(
+            f"node_name={NODE_NAME} | "
+            f"role={ROLE} | "
+            f"result=recovered | "
+            f"tickets={len(tickets)} | "
+            f"server_lamport={server_lamport} | "
+            f"server_sequence={server_sequence}"
+        )
+
+        send_json_response(
+            self,
+            200,
+            {
+                "node_name": NODE_NAME,
+                "role": ROLE,
+                "status": "recovered",
+                "tickets": len(tickets),
+                "server_lamport": server_lamport,
+                "server_sequence": server_sequence,
+            },
+        )
+
+    def handle_replication(self):
+        global server_lamport
+        global server_sequence
+        global next_ticket_id
+
+        # Only followers accept replication requests.
+        if ROLE != "follower":
+            send_json_response(
+                self,
+                403,
+                {
+                    "error": (
+                        "Only follower nodes accept replication"
+                    )
+                },
+            )
+            return
+
+        # Read replication body.
+        content_length = int(
+            self.headers.get("Content-Length", 0)
+        )
+        body = self.rfile.read(content_length)
+
+        try:
+            ticket = json.loads(
+                body.decode("utf-8")
+            )
+        except json.JSONDecodeError:
+            send_json_response(
+                self,
+                400,
+                {"error": "Invalid JSON"},
+            )
+            return
+
+        # Validate replicated ticket.
         required_fields = [
             "ticket_id",
             "request_id",
@@ -542,7 +643,7 @@ class TicketRequestHandler(BaseHTTPRequestHandler):
             "client_lamport",
             "server_lamport",
             "server_sequence",
-            "status"
+            "status",
         ]
 
         missing_fields = [
@@ -552,26 +653,20 @@ class TicketRequestHandler(BaseHTTPRequestHandler):
         ]
 
         if missing_fields:
-
             send_json_response(
                 self,
                 400,
                 {
-                    "error":
-                    "Missing replication fields",
-                    "missing_fields":
-                    missing_fields
-                }
+                    "error": "Missing replication fields",
+                    "missing_fields": missing_fields,
+                },
             )
-
             return
 
         request_id = ticket["request_id"]
 
-        # Duplicate replication protection
-
+        # Duplicate replication protection.
         if request_id in processed_requests:
-
             send_json_response(
                 self,
                 200,
@@ -579,38 +674,31 @@ class TicketRequestHandler(BaseHTTPRequestHandler):
                     "node_name": NODE_NAME,
                     "replicated": False,
                     "duplicate": True,
-                    "ticket_id":
-                    processed_requests[
+                    "ticket_id": processed_requests[
                         request_id
-                    ]["ticket_id"]
-                }
+                    ]["ticket_id"],
+                },
             )
-
             return
 
-        # Store ticket
-
+        # Store replicated ticket.
         tickets.append(ticket)
+        processed_requests[request_id] = dict(ticket)
 
-        processed_requests[
-            request_id
-        ] = dict(ticket)
-
-        # Keep local counters synchronized
-
+        # Keep local counters synchronized.
         server_lamport = max(
             server_lamport,
-            ticket["server_lamport"]
+            ticket["server_lamport"],
         )
 
         server_sequence = max(
             server_sequence,
-            ticket["server_sequence"]
+            ticket["server_sequence"],
         )
 
         next_ticket_id = max(
             next_ticket_id,
-            ticket["ticket_id"] + 1
+            ticket["ticket_id"] + 1,
         )
 
         send_json_response(
@@ -620,77 +708,61 @@ class TicketRequestHandler(BaseHTTPRequestHandler):
                 "node_name": NODE_NAME,
                 "replicated": True,
                 "duplicate": False,
-                "ticket_id":
-                ticket["ticket_id"]
-            }
+                "ticket_id": ticket["ticket_id"],
+            },
         )
 
 
-# Run server
-
 def run_server():
-
     global NODE_NAME
     global ROLE
     global PORT
 
     if len(sys.argv) != 4:
-
         print(
             "Usage: python app/server.py "
             "<node_name> <role> <port>"
         )
-
         print()
-
+        print("Examples:")
         print(
-            "Examples:"
+            "python app/server.py "
+            "ticket-server leader 8000"
         )
-
         print(
-            "python app/server.py leader leader 8000"
+            "python app/server.py "
+            "follower-B follower 8001"
         )
-
         print(
-            "python app/server.py follower-B follower 8001"
+            "python app/server.py "
+            "follower-C follower 8002"
         )
-
-        print(
-            "python app/server.py follower-C follower 8002"
-        )
-
         return
 
     NODE_NAME = sys.argv[1]
-
     ROLE = sys.argv[2]
-
-    PORT = int(
-        sys.argv[3]
-    )
+    PORT = int(sys.argv[3])
 
     server_address = (
         "localhost",
-        PORT
+        PORT,
     )
 
     server = HTTPServer(
         server_address,
-        TicketRequestHandler
+        TicketRequestHandler,
     )
 
     print()
-    print("======================================")
     print("Distributed Help Desk Ticket Server")
-    print("======================================")
+    print("===================================")
     print(f"Node name : {NODE_NAME}")
     print(f"Role      : {ROLE}")
     print(f"Port      : {PORT}")
-    print(
-        f"URL       : http://localhost:{PORT}"
-    )
+    print(f"URL       : http://localhost:{PORT}")
     print("Status    : healthy")
-    print("======================================")
+    print("===================================")
+    print("Endpoints : /health /tickets /promote /replicate /state /recover")
     print("Press Ctrl+C to stop the server.")
     print()
 
