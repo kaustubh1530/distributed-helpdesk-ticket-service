@@ -37,7 +37,11 @@ NODE_NAME = "ticket-server"
 ROLE = "leader"
 PORT = 8000
 
+# All cluster peers. The current node is excluded automatically
+# by get_replication_targets(). This allows any promoted follower
+# to replicate to the other two nodes.
 FOLLOWERS = [
+    "http://localhost:8000",
     "http://localhost:8001",
     "http://localhost:8002",
 ]
@@ -130,6 +134,65 @@ def replicate_ticket(ticket):
         if result["success"]
     )
 
+    return replication_results, successful_replications
+
+
+def replicate_status_update(update):
+    """Replicate a ticket status change to the other cluster nodes."""
+    replication_results = []
+    payload = json.dumps(update).encode("utf-8")
+
+    for node_url in get_replication_targets():
+        request = urllib.request.Request(
+            f"{node_url}/replicate-status",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(request, timeout=2) as response:
+                response_data = json.loads(
+                    response.read().decode("utf-8")
+                )
+
+            replicated = response_data.get("replicated") is True
+            replication_results.append(
+                {
+                    "node": node_url,
+                    "success": replicated,
+                    "response": response_data,
+                }
+            )
+
+        except urllib.error.URLError as error:
+            replication_results.append(
+                {
+                    "node": node_url,
+                    "success": False,
+                    "error": str(getattr(error, "reason", error)),
+                }
+            )
+        except (TimeoutError, json.JSONDecodeError, UnicodeDecodeError) as error:
+            replication_results.append(
+                {
+                    "node": node_url,
+                    "success": False,
+                    "error": str(error),
+                }
+            )
+        except Exception as error:
+            replication_results.append(
+                {
+                    "node": node_url,
+                    "success": False,
+                    "error": str(error),
+                }
+            )
+
+    successful_replications = sum(
+        1 for result in replication_results if result["success"]
+    )
     return replication_results, successful_replications
 
 
@@ -253,7 +316,17 @@ class TicketRequestHandler(BaseHTTPRequestHandler):
             self.handle_recovery()
             return
 
-        # Follower replication endpoint.
+        # Leader-side ticket status update endpoint.
+        if self.path == "/tickets/status":
+            self.handle_status_update()
+            return
+
+        # Follower status replication endpoint.
+        if self.path == "/replicate-status":
+            self.handle_status_replication()
+            return
+
+        # Follower ticket replication endpoint.
         if self.path == "/replicate":
             self.handle_replication()
             return
@@ -598,6 +671,277 @@ class TicketRequestHandler(BaseHTTPRequestHandler):
             },
         )
 
+    def handle_status_update(self):
+        """Update a ticket's status on the leader and replicate the change."""
+        global server_lamport
+        global server_sequence
+
+        if ROLE != "leader":
+            send_json_response(
+                self,
+                403,
+                {"error": "Only the leader can update ticket status"},
+            )
+            return
+
+        content_length = int(self.headers.get("Content-Length", 0))
+        try:
+            data = json.loads(self.rfile.read(content_length).decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            send_json_response(self, 400, {"error": "Invalid JSON"})
+            return
+
+        ticket_id = data.get("ticket_id")
+        new_status = data.get("status")
+        allowed_statuses = {"open", "in_progress", "closed"}
+
+        if (
+            isinstance(ticket_id, bool)
+            or not isinstance(ticket_id, int)
+            or ticket_id < 1
+        ):
+            send_json_response(
+                self, 400, {"error": "ticket_id must be a positive integer"}
+            )
+            return
+
+        if not isinstance(new_status, str) or new_status not in allowed_statuses:
+            send_json_response(
+                self,
+                400,
+                {"error": "Status must be open, in_progress, or closed"},
+            )
+            return
+
+        ticket = next(
+            (item for item in tickets if item.get("ticket_id") == ticket_id),
+            None,
+        )
+        if ticket is None:
+            send_json_response(self, 404, {"error": "Ticket not found"})
+            return
+
+        old_status = ticket.get("status", "open")
+        if old_status == new_status:
+            send_json_response(
+                self,
+                200,
+                {
+                    "node_name": NODE_NAME,
+                    "ticket_id": ticket_id,
+                    "previous_status": old_status,
+                    "status": old_status,
+                    "unchanged": True,
+                    "committed": True,
+                    "majority_acknowledged": True,
+                },
+            )
+            return
+
+        # Save the current values so a failed quorum attempt can be rolled back.
+        old_lamport = server_lamport
+        old_sequence = server_sequence
+        old_status_lamport = ticket.get("status_lamport")
+        old_status_sequence = ticket.get("status_sequence")
+
+        server_lamport += 1
+        server_sequence += 1
+        ticket["status"] = new_status
+        ticket["status_lamport"] = server_lamport
+        ticket["status_sequence"] = server_sequence
+
+        update = {
+            "ticket_id": ticket_id,
+            "status": new_status,
+            "status_lamport": server_lamport,
+            "status_sequence": server_sequence,
+        }
+
+        replication_results, successful_replications = (
+            replicate_status_update(update)
+        )
+        majority_acknowledged = (
+            1 + successful_replications >= MAJORITY_REQUIRED
+        )
+
+        if not majority_acknowledged:
+            # Restore the local ticket and ordering counters if no follower
+            # acknowledged the change. This is a teaching-project quorum
+            # check, not a full consensus protocol.
+            ticket["status"] = old_status
+            server_lamport = old_lamport
+            server_sequence = old_sequence
+
+            if old_status_lamport is None:
+                ticket.pop("status_lamport", None)
+            else:
+                ticket["status_lamport"] = old_status_lamport
+
+            if old_status_sequence is None:
+                ticket.pop("status_sequence", None)
+            else:
+                ticket["status_sequence"] = old_status_sequence
+
+            processed_requests[ticket["request_id"]] = dict(ticket)
+
+            send_json_response(
+                self,
+                503,
+                {
+                    "error": "Status update did not reach a majority",
+                    "node_name": NODE_NAME,
+                    "ticket_id": ticket_id,
+                    "status": old_status,
+                    "successful_replications": successful_replications,
+                    "majority_required": MAJORITY_REQUIRED,
+                    "majority_acknowledged": False,
+                    "committed": False,
+                    "replication_results": replication_results,
+                },
+            )
+            return
+
+        # Keep the idempotency record aligned with the updated ticket.
+        processed_requests[ticket["request_id"]] = dict(ticket)
+
+        logger.info(
+            f"node_name={NODE_NAME} | operation=status_update | "
+            f"ticket_id={ticket_id} | status={new_status} | "
+            f"server_lamport={server_lamport} | "
+            f"server_sequence={server_sequence} | committed=True"
+        )
+
+        send_json_response(
+            self,
+            200,
+            {
+                "node_name": NODE_NAME,
+                "ticket_id": ticket_id,
+                "previous_status": old_status,
+                "status": new_status,
+                "status_lamport": server_lamport,
+                "status_sequence": server_sequence,
+                "successful_replications": successful_replications,
+                "majority_required": MAJORITY_REQUIRED,
+                "majority_acknowledged": True,
+                "committed": True,
+                "replication_results": replication_results,
+            },
+        )
+
+    def handle_status_replication(self):
+        """Apply a leader's ticket status update on a follower."""
+        global server_lamport
+        global server_sequence
+
+        if ROLE != "follower":
+            send_json_response(
+                self,
+                403,
+                {"error": "Only followers accept status replication"},
+            )
+            return
+
+        content_length = int(self.headers.get("Content-Length", 0))
+        try:
+            update = json.loads(self.rfile.read(content_length).decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            send_json_response(self, 400, {"error": "Invalid JSON"})
+            return
+
+        ticket_id = update.get("ticket_id")
+        new_status = update.get("status")
+        status_lamport = update.get("status_lamport")
+        status_sequence = update.get("status_sequence")
+
+        if (
+            isinstance(ticket_id, bool)
+            or not isinstance(ticket_id, int)
+            or ticket_id < 1
+            or not isinstance(new_status, str)
+            or new_status not in {"open", "in_progress", "closed"}
+            or isinstance(status_lamport, bool)
+            or not isinstance(status_lamport, int)
+            or status_lamport < 0
+            or isinstance(status_sequence, bool)
+            or not isinstance(status_sequence, int)
+            or status_sequence < 1
+        ):
+            send_json_response(self, 400, {"error": "Invalid status update"})
+            return
+
+        ticket = next(
+            (item for item in tickets if item.get("ticket_id") == ticket_id),
+            None,
+        )
+        if ticket is None:
+            send_json_response(
+                self,
+                404,
+                {
+                    "error": (
+                        "Ticket not found on follower; recover state first"
+                    )
+                },
+            )
+            return
+
+        # Repeated delivery of the same status event is safe.
+        if (
+            ticket.get("status") == new_status
+            and ticket.get("status_sequence") == status_sequence
+        ):
+            send_json_response(
+                self,
+                200,
+                {
+                    "node_name": NODE_NAME,
+                    "replicated": True,
+                    "duplicate": True,
+                    "ticket_id": ticket_id,
+                    "status": new_status,
+                },
+            )
+            return
+
+        # Do not overwrite a newer status event with an older one.
+        current_status_sequence = ticket.get("status_sequence", 0)
+        if status_sequence < current_status_sequence:
+            send_json_response(
+                self,
+                200,
+                {
+                    "node_name": NODE_NAME,
+                    "replicated": False,
+                    "stale": True,
+                    "ticket_id": ticket_id,
+                    "current_status": ticket.get("status"),
+                    "current_status_sequence": current_status_sequence,
+                },
+            )
+            return
+
+        ticket["status"] = new_status
+        ticket["status_lamport"] = status_lamport
+        ticket["status_sequence"] = status_sequence
+
+        server_lamport = max(server_lamport, status_lamport)
+        server_sequence = max(server_sequence, status_sequence)
+        processed_requests[ticket["request_id"]] = dict(ticket)
+
+        send_json_response(
+            self,
+            200,
+            {
+                "node_name": NODE_NAME,
+                "replicated": True,
+                "duplicate": False,
+                "ticket_id": ticket_id,
+                "status": new_status,
+                "status_sequence": status_sequence,
+            },
+        )
+
     def handle_replication(self):
         global server_lamport
         global server_sequence
@@ -762,7 +1106,7 @@ def run_server():
     print(f"URL       : http://localhost:{PORT}")
     print("Status    : healthy")
     print("===================================")
-    print("Endpoints : /health /tickets /promote /replicate /state /recover")
+    print("Endpoints : /health /tickets /tickets/status /promote /replicate /replicate-status /state /recover")
     print("Press Ctrl+C to stop the server.")
     print()
 

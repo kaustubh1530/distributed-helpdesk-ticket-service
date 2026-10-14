@@ -6,7 +6,7 @@ import uuid
 
 
 
-SERVER_URL = "http://localhost:8000"
+SERVER_URL = "http://localhost:8002"
 
 # Lamport logical clock for this client process
 lamport_clock = 0
