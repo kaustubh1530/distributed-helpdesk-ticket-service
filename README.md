@@ -1,23 +1,74 @@
-# Guided Distributed Help Desk Ticket Service
+# Distributed Help Desk Ticket Service
 
-## COMP421 Distributed Systems II — Midterm Project
+## COMP421 — Distributed Systems II | Final Project
 
-A small client-server ticket service developed to demonstrate core distributed-systems concepts from Weeks 1–4:
+A distributed help desk ticket service built to demonstrate communication, logical clocks, request ordering, retry safety, leader-based replication, quorum acknowledgments, fault handling, and recovery.
 
-- HTTP/JSON communication
-- Client and server Lamport logical clocks
-- Server-assigned total ordering
-- Bounded timeout and retry
-- Request-ID idempotency
-- In-memory ticket storage
-- Structured server logging
-- Two-client ordering
+The project extends the original Weeks 1–4 client-server implementation into a three-node prototype with a React frontend.
 
-The Midterm architecture uses **one ticket server and two clients**. The later three-node replication work is treated as preparation for the Weeks 5–8 Final extension.
+## 1. Project Overview
 
----
+The service allows clients to create and retrieve help desk tickets. A leader coordinates ticket creation and replication to two follower nodes. The system includes bounded retries, request-ID idempotency, Lamport logical clocks, server-assigned sequence numbers, health checks, and recovery endpoints.
 
-## 1. Project Structure
+### Key Features
+
+- HTTP/JSON client-server communication
+- Three-node leader/follower architecture
+- Leader-coordinated ticket replication
+- Two-of-three acknowledgment policy for successful writes
+- Lamport logical clocks and server-assigned sequence numbers
+- Request-ID idempotency to prevent duplicate ticket creation
+- Bounded client retries and timeout handling
+- Health and replication-status endpoints
+- Manual leader promotion and follower recovery
+- React/Vite frontend
+- Fault testing and structured server logs
+
+**Important:** This is an educational replication prototype, not a complete Raft implementation. Leader promotion is manual, and recovery is not a fully automatic consensus or distributed recovery protocol.
+
+## 2. Architecture
+
+The system uses three server processes running on separate local ports.
+
+| Node | Role | Address |
+|---|---|---|
+| `ticket-server` | Leader | `http://localhost:8000` |
+| `follower-B` | Follower | `http://localhost:8001` |
+| `follower-C` | Follower | `http://localhost:8002` |
+| React frontend | Web UI | `http://localhost:5173` |
+
+### Simplified architecture
+
+```text
+                 React Frontend
+                localhost:5173
+                       |
+                       v
+               Leader: port 8000
+                 /           \
+                v             v
+       Follower-B           Follower-C
+        port 8001            port 8002
+```
+
+The leader coordinates writes and replication. A write is considered successful only when the required two-of-three acknowledgment condition is satisfied.
+
+If one follower is unavailable, the leader and remaining follower can form a two-node majority. If the leader cannot obtain the required acknowledgments, the write is rejected.
+
+## 3. Technology Stack
+
+- **Backend:** Python 3
+- **Communication:** HTTP and JSON
+- **Frontend:** React and Vite
+- **Logical time:** Lamport clocks
+- **Ordering:** Leader-assigned sequence numbers
+- **Storage:** In-memory ticket state in the running processes
+- **Testing:** HTTP requests and controlled node failures
+- **Version control:** Git and GitHub
+
+No external database is required by the current prototype.
+
+## 4. Project Structure
 
 ```text
 distributed-helpdesk-ticket-service/
@@ -25,6 +76,9 @@ distributed-helpdesk-ticket-service/
 │   └── server.py
 ├── client/
 │   └── client.py
+├── frontend/
+│   ├── package.json
+│   └── src/
 ├── tests/
 ├── docs/
 ├── logs/
@@ -34,28 +88,29 @@ distributed-helpdesk-ticket-service/
 └── .gitignore
 ```
 
----
+The exact contents of subdirectories may change as the project develops.
 
-## 2. Requirements
+## 5. Requirements
+
+Install the following tools:
 
 - Python 3
-- macOS, Linux, or Windows
-- Terminal
-- No external database is required for the Midterm
+- Node.js and npm
+- Git
+- Terminal or a compatible command-line shell
 
-The project uses Python's standard-library HTTP/JSON functionality.
+The commands below use macOS/Linux shell syntax.
 
----
+## 6. Backend Setup
 
-## 3. Setup
-
-From the project directory:
+Clone the repository and enter the project directory:
 
 ```bash
-cd ~/Desktop/distributed-helpdesk-ticket-service
+git clone https://github.com/kaustubh1530/distributed-helpdesk-ticket-service.git
+cd distributed-helpdesk-ticket-service
 ```
 
-Create the virtual environment if it does not already exist:
+Create a virtual environment if needed:
 
 ```bash
 python3 -m venv venv
@@ -67,418 +122,277 @@ Activate it:
 source venv/bin/activate
 ```
 
-On Windows PowerShell:
-
-```powershell
-venv\Scripts\Activate.ps1
-```
-
----
-
-## 4. Start the Midterm Server
-
-Open Terminal 1 and run:
+Install the backend dependencies:
 
 ```bash
+pip install -r requirements.txt
+```
+
+## 7. Start the Three Nodes
+
+Open three separate Terminal windows or tabs. Run each command from the project root and keep all three processes running.
+
+**Terminal 1 — Leader**
+
+```bash
+source venv/bin/activate
 python app/server.py ticket-server leader 8000
 ```
 
-The server listens on:
+**Terminal 2 — Follower B**
 
-```text
-http://localhost:8000
+```bash
+source venv/bin/activate
+python app/server.py follower-B follower 8001
 ```
 
-Keep this terminal running during the tests.
+**Terminal 3 — Follower C**
 
-> Note: The current code also contains the Final-stage replication hooks. For the Midterm tests, the required behavior is evaluated through the single leader/server on port 8000. If follower processes are not running, replication connection errors may appear in the response; these are not part of the Midterm success criteria.
+```bash
+source venv/bin/activate
+python app/server.py follower-C follower 8002
+```
 
----
+### Check node health
 
-## 5. Verify Server Health
+From another Terminal window:
 
-From another terminal:
+```bash
+curl -i http://localhost:8000/health
+curl -i http://localhost:8001/health
+curl -i http://localhost:8002/health
+```
+
+The health response identifies the node, its role, and its status.
+
+Additional endpoints for checking ticket state and replication include:
+
+```bash
+curl -i http://localhost:8000/tickets
+curl -i http://localhost:8000/tickets/status
+curl -i http://localhost:8000/replicate-status
+curl -i http://localhost:8000/state
+```
+
+Repeat the appropriate requests against ports `8001` and `8002` when comparing node state.
+
+## 8. Start the React Frontend
+
+Open another Terminal window:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open the local address printed by Vite, normally:
+
+```text
+http://localhost:5173
+```
+
+Keep the backend nodes running while using the frontend.
+
+## 9. API Examples
+
+### Health check — `GET /health`
 
 ```bash
 curl http://localhost:8000/health
 ```
 
-Expected structure:
+Checks the node's reported health and role.
 
-```json
-{
-  "node_name": "ticket-server",
-  "role": "leader",
-  "status": "healthy"
-}
+### Create a ticket — `POST /tickets`
+
+```bash
+curl -i -X POST http://localhost:8000/tickets \
+  -H "Content-Type: application/json" \
+  -d '{
+    "request_id": "demo-request-001",
+    "client_id": "demo-student-01",
+    "title": "Cannot connect to campus Wi-Fi",
+    "client_lamport": 1
+  }'
 ```
 
-This verifies that the server is running.
+The request includes a unique request ID, client identifier, ticket title, and client logical timestamp.
 
----
+Use a new request ID for a new ticket. To test idempotency, replay the same request with the same ID.
 
-## 6. Run a Client
+### List tickets — `GET /tickets`
 
-Open Terminal 2:
+```bash
+curl -s http://localhost:8000/tickets | python -m json.tool
+```
+
+The response includes ticket state and ordering information, including the server Lamport clock and server sequence.
+
+### Other endpoints
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /health` | Check node health |
+| `POST /tickets` | Submit a ticket |
+| `GET /tickets` | Retrieve ticket state |
+| `GET /tickets/status` | Inspect ticket status information |
+| `GET /replicate-status` | Inspect replication status |
+| `GET /state` | Inspect node state |
+| `POST /replicate` | Replication-related operation |
+| `POST /promote` | Request leader promotion |
+| `POST /recover` | Request recovery from the active leader |
+
+The precise request formats and preconditions for administrative endpoints should be checked in `app/server.py` before using them.
+
+## 10. Distributed Systems Concepts
+
+### Lamport logical clocks
+
+Lamport clocks represent logical ordering rather than synchronized wall-clock time. The server updates its logical clock when processing events, using the incoming client timestamp and its existing clock.
+
+A simplified update rule is:
+
+```text
+server_lamport = max(client_lamport, server_lamport) + 1
+```
+
+### Server-assigned sequence numbers
+
+The leader assigns sequence numbers to accepted ticket operations. These numbers provide an ordering for operations coordinated by the leader.
+
+Sequence numbers and Lamport timestamps are different: the sequence tracks the assigned operation order, while the Lamport clock tracks logical event time.
+
+### Bounded retries and idempotency
+
+A client may time out even when a request has already been processed. Retrying with the same request ID allows the server to recognize a repeated operation and return the existing result instead of creating another ticket.
+
+### Quorum acknowledgments
+
+The prototype uses a two-of-three acknowledgment policy. The leader counts toward the required majority, so a write can proceed when the leader and one follower acknowledge it.
+
+A successful response should not be interpreted as a guarantee of durable storage across arbitrary crashes. The implementation uses in-memory state and does not provide a complete consensus protocol.
+
+## 11. Fault Testing
+
+Run the following scenarios with the three nodes started. Record the HTTP responses, node states, and logs for your evidence folder.
+
+### Test 1 — All nodes healthy
+
+1. Start the leader and both followers.
+2. Check the health of all three nodes.
+3. Create a ticket through the leader.
+4. Inspect the ticket state on each node.
+
+**Expected observation:** A successful write should be reflected in the replicated state according to the implemented acknowledgment and replication behavior.
+
+### Test 2 — One follower unavailable
+
+1. Stop follower C using `Ctrl+C` in its Terminal.
+2. Confirm the leader and follower B are running.
+3. Submit a new ticket to the leader.
+4. Inspect the response and available node state.
+
+**Expected observation:** A write can succeed if the leader and the remaining follower satisfy the required majority.
+
+Restart follower C after the experiment.
+
+### Test 3 — No majority available
+
+1. Stop both followers.
+2. Submit a new ticket to the leader.
+3. Inspect the HTTP response and ticket list.
+4. Restart the followers.
+
+**Expected observation:** The write should be rejected when the required majority cannot be obtained. Check the actual state and logs rather than assuming all counters remain unchanged.
+
+### Test 4 — Duplicate request
+
+Submit the same request twice with the same `request_id`.
+
+**Expected observation:** A repeated committed request should not create a second ticket when the idempotency record is available.
+
+### Test 5 — Recovery
+
+1. Ensure the intended active leader has the committed ticket state.
+2. Use the implemented recovery operation for the returning node.
+3. Compare the recovered node's ticket list and state with the active leader.
+4. Capture the results.
+
+**Expected observation:** The recovery procedure should bring the node toward the active leader's state for the supported recovery scenario. Do not describe this as automatic catch-up unless it has been independently verified.
+
+### Test 6 — Manual leader promotion
+
+1. Stop or isolate the current leader.
+2. Confirm that writes cannot safely proceed through the unavailable leader.
+3. Designate an appropriate follower as the new leader using the supported promotion procedure.
+4. Update the client or request destination as necessary.
+5. Verify health and ticket state before testing new writes.
+
+**Expected observation:** Leadership changes are manually controlled in this prototype. This is not an automatic Raft election.
+
+## 12. Consistency, Availability, and Limitations
+
+The project demonstrates the trade-offs involved in maintaining replicated state when nodes fail or cannot communicate.
+
+- **Consistency:** Writes use leader coordination and a two-of-three acknowledgment condition. The prototype does not establish formal linearizability for every possible read and failure scenario.
+- **Availability:** A write may continue with one follower unavailable if the leader and remaining follower acknowledge it. Without a majority, writes are rejected.
+- **Stale reads:** A follower may temporarily expose state that has not caught up with the active leader. Read behavior must be evaluated against the actual endpoint implementation.
+- **Recovery:** Recovery is an explicit operation, not a fully automatic synchronization protocol.
+- **Persistence:** Ticket data is held in memory. A process restart can lose state unless the appropriate recovery or snapshot procedure is used.
+- **Failover:** Leader promotion is manual.
+- **Consensus:** The project does not implement the full Raft election, log replication, and safety protocol.
+
+These limitations are part of the project's distributed-systems analysis and should be considered when interpreting fault-test results.
+
+## 13. Protocol and Design Comparisons
+
+The final report discusses the prototype in relation to:
+
+- **Raft:** Leader-based replication and quorum ideas, while distinguishing the prototype from full consensus.
+- **Two-Phase Commit (2PC):** Coordinating distributed transactions and the availability costs associated with waiting for participants.
+- **CAP theorem:** The trade-off between consistency and availability during network partitions.
+- **CRDTs:** An alternative approach for some replicated data types when concurrent updates and eventual convergence are acceptable.
+- **Spanner:** A comparison point for globally distributed consistency and time-related design, beyond the guarantees provided by this local prototype.
+
+These comparisons are analytical; they do not imply that the project implements these systems or protocols.
+
+## 14. Evidence and Documentation
+
+Use the `evidence/` directory to organize verified screenshots, command outputs, and fault-test traces.
+
+Recommended evidence includes:
+
+- All-node health checks
+- Ticket creation and ticket-list output
+- Duplicate-request behavior
+- One-follower-down test
+- No-majority rejection
+- Recovery and node-state comparison
+- Manual promotion test
+- Frontend dashboard
+
+Keep evidence free of private information, credentials, and secrets. Include only test results that were actually observed.
+
+The final submission may also include the architecture diagram, interface specification, requirement-to-test traceability matrix, final report, presentation slides, and demo recording required by the course.
+
+## 15. Running the Original Client
+
+The original Python client can still be used for client-server demonstrations:
 
 ```bash
 source venv/bin/activate
 python client/client.py client-A
 ```
 
-Enter a ticket title when prompted.
+Run another client in a separate terminal if you want to demonstrate concurrent client requests and server-assigned ordering.
 
-For a second client, open Terminal 3:
+## 16. Academic Integrity and AI Assistance
 
-```bash
-source venv/bin/activate
-python client/client.py client-B
-```
+AI tools were used as development assistance for explanation, debugging support, documentation, and code-development guidance. Implementation behavior and reported test results should be supported by the student's own execution and evidence.
 
-Each client maintains its own Lamport clock and generates a request ID for each ticket operation.
+Follow the University's requirements for disclosing and citing AI assistance. Be prepared to explain the code, design decisions, limitations, and test results.
 
----
+## 17. Repository
 
-# 7. API
-
-## GET /health
-
-Checks server status.
-
-```bash
-curl http://localhost:8000/health
-```
-
-## POST /tickets
-
-Creates a ticket.
-
-Example:
-
-```bash
-curl -X POST http://localhost:8000/tickets -H "Content-Type: application/json" -d '{"request_id":"example-001","client_id":"client-A","title":"Cannot connect to campus WiFi","client_lamport":1}'
-```
-
-Required fields:
-
-```text
-request_id
-client_id
-title
-client_lamport
-```
-
-## GET /tickets
-
-Returns current ticket state and ordering information.
-
-```bash
-curl http://localhost:8000/tickets
-```
-
-The response includes:
-
-```text
-tickets
-server_lamport
-server_sequence
-```
-
----
-
-# 8. Midterm Test Procedures
-
-The Midterm requires four test scenarios.
-
-## Test 1 — Normal Request
-
-Start a fresh server and submit:
-
-```bash
-curl -X POST http://localhost:8000/tickets -H "Content-Type: application/json" -d '{"request_id":"midterm-normal-002","client_id":"client-A","title":"Normal request test","client_lamport":1}'
-```
-
-Then check state:
-
-```bash
-curl http://localhost:8000/tickets
-```
-
-Expected result:
-
-- One ticket is created.
-- `server_sequence` becomes 1.
-- `server_lamport` becomes 2 for this clean test.
-- The ticket status is `open`.
-
-Evidence:
-
-```text
-evidence/normal_request.png
-evidence/normal_request_state.png
-```
-
----
-
-## Test 2 — Delayed Response and Bounded Retry
-
-This is a controlled experiment used to demonstrate timeout uncertainty.
-
-The experiment temporarily configured the server to delay its response for 5 seconds after committing the ticket while the client timeout was 3 seconds.
-
-The client therefore:
-
-1. Sends Attempt 1.
-2. Times out after 3 seconds.
-3. Retries.
-4. Reuses the exact same request ID.
-5. Receives the original ticket from the server's idempotency cache.
-
-Observed request ID:
-
-```text
-e9355191-3309-43f3-917e-56e47d39ce5b
-```
-
-The final state contained one ticket with:
-
-```text
-ticket_id = 1
-server_lamport = 2
-server_sequence = 1
-duplicate = true
-```
-
-The temporary delay was removed after the controlled experiment and is not part of normal server operation.
-
-Evidence:
-
-```text
-evidence/delayed_retry_client.png
-evidence/delayed_retry_state.png
-evidence/delayed_retry_log.png
-```
-
----
-
-## Test 3 — Duplicate Request / Idempotency
-
-Submit the same request ID twice.
-
-First request:
-
-```bash
-curl -X POST http://localhost:8000/tickets -H "Content-Type: application/json" -d '{"request_id":"midterm-duplicate-001","client_id":"client-A","title":"Duplicate request test","client_lamport":1}'
-```
-
-Send the exact same request again:
-
-```bash
-curl -X POST http://localhost:8000/tickets -H "Content-Type: application/json" -d '{"request_id":"midterm-duplicate-001","client_id":"client-A","title":"Duplicate request test","client_lamport":1}'
-```
-
-Then verify state:
-
-```bash
-curl http://localhost:8000/tickets
-```
-
-Expected result:
-
-- The first request creates the ticket.
-- The second request returns the original ticket.
-- The second response contains `duplicate: true`.
-- No second ticket is created.
-- The server sequence does not increase for the duplicate.
-
-Evidence:
-
-```text
-evidence/duplicate_request.png
-evidence/duplicate_request_state.png
-evidence/duplicate_request_log.png
-```
-
----
-
-## Test 4 — Two-Client Ordering
-
-Start a fresh server.
-
-Run Client A:
-
-```bash
-python client/client.py client-A
-```
-
-Run Client B in another terminal:
-
-```bash
-python client/client.py client-B
-```
-
-Submit the requests close together.
-
-The clean ordering experiment produced:
-
-```text
-Client A
-client_lamport = 1
-server_lamport = 2
-server_sequence = 1
-
-Client B
-client_lamport = 1
-server_lamport = 3
-server_sequence = 2
-```
-
-The server sequence provides a simple total order for accepted requests at the server.
-
-Check the final state:
-
-```bash
-curl http://localhost:8000/tickets
-```
-
-Evidence:
-
-```text
-evidence/ordering_client_A.png
-evidence/ordering_client_B.png
-evidence/ordering_server_tickets.png
-```
-
----
-
-# 9. Lamport Clock Rule
-
-The server uses:
-
-```text
-max(client_lamport, server_lamport) + 1
-```
-
-For example:
-
-```text
-Client A sends: client_lamport = 1
-Server updates: server_lamport = 2
-
-Client B sends: client_lamport = 1
-Server updates: server_lamport = 3
-```
-
-Lamport timestamps represent **logical time/order**, not synchronized wall-clock time.
-
----
-
-# 10. Retry and Idempotency
-
-The client uses:
-
-- 3-second request timeout
-- Maximum of 2 retries
-- Maximum of 3 total attempts
-- One request ID reused across all attempts
-
-The server stores completed request results by `request_id`.
-
-Therefore, if a retry arrives after the original request was already committed, the server can return the original result instead of creating another ticket.
-
----
-
-# 11. Structured Logging
-
-Server logs are stored in:
-
-```text
-logs/server.log
-```
-
-The log records:
-
-```text
-request_id
-client_id
-logical_time
-server_sequence
-result
-duplicate status
-```
-
-Example:
-
-```text
-request_id=midterm-duplicate-001 | client_id=client-A |
-logical_time=2 | server_sequence=1 |
-result=created | duplicate=false
-```
-
-A repeated request produces a duplicate log entry rather than another ticket creation.
-
----
-
-# 12. Midterm Limitations
-
-The Midterm intentionally uses a simple architecture:
-
-- One server
-- Two clients
-- In-memory state
-- No persistent database
-- No automatic failover
-- No quorum/consensus protocol
-
-Restarting the server clears the in-memory ticket state.
-
----
-
-# 13. Weeks 5–8 Final Extension
-
-The planned Final extension expands the system to a three-node leader/follower architecture:
-
-```text
-Leader:   localhost:8000
-Follower: localhost:8001
-Follower: localhost:8002
-```
-
-Planned Final work includes:
-
-- Leader-based replication
-- Two-of-three acknowledgment / quorum
-- Follower failure handling
-- Manual leader failover
-- Recovery
-- Explicit consistency analysis
-- Comparison with Raft, 2PC, CAP, CRDTs, and Spanner concepts
-
-The replication prototype is treated as Final preparation and is not used to redefine the Midterm's single-server requirements.
-
----
-
-# 14. Evidence
-
-All Midterm evidence is stored in:
-
-```text
-evidence/
-```
-
-The evidence covers:
-
-1. Normal request
-2. Delayed response and retry
-3. Duplicate request / idempotency
-4. Two-client ordering
-
-See the project report for the detailed test results and interpretation.
-
----
-
-# 15. Academic Integrity / AI Assistance
-
-AI tools were used as development assistance for explanation, debugging support, documentation, and code-development guidance. The submitted implementation, test behavior, screenshots, and results were executed and verified by the student.
-
-Students submitting this project should follow the University's requirements for disclosure and citation of AI assistance.
+GitHub: https://github.com/kaustubh1530/distributed-helpdesk-ticket-service
